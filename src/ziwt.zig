@@ -5,6 +5,11 @@ const mem = std.mem;
 
 const Allocator = mem.Allocator;
 
+const alg_str_none = "none";
+const alg_str_hs256 = "HS256";
+
+const typ_str_jwt = "JWT";
+
 const Header = struct {
     alg: []const u8,
     typ: ?[]const u8 = null,
@@ -15,16 +20,16 @@ pub const Algorithm = enum(u8) {
     hs256,
 
     const strs = [_][]const u8{
-        "none",
-        "HS256",
+        alg_str_none,
+        alg_str_hs256,
     };
 
     fn parseFromString(s: []const u8) !Algorithm {
         // TODO: reimplement this in a smarter way.
         // An actual simple parser should be faster.
-        if (mem.eql(u8, "none", s)) {
+        if (mem.eql(u8, alg_str_none, s)) {
             return .none;
-        } else if (mem.eql(u8, "HS256", s)) {
+        } else if (mem.eql(u8, alg_str_hs256, s)) {
             return .hs256;
         }
 
@@ -35,7 +40,7 @@ pub const Algorithm = enum(u8) {
         var h = Header{ .alg = strs[@intFromEnum(self)] };
 
         if (self != .none) {
-            h.typ = "JWT";
+            h.typ = typ_str_jwt;
         }
 
         return h;
