@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 
 const Header = struct {
     alg: []const u8,
-    typ: []const u8,
+    typ: ?[]const u8,
 };
 
 pub const Algorithm = enum(u8) {
@@ -18,8 +18,16 @@ pub const Algorithm = enum(u8) {
         "HS256",
     };
 
-    inline fn headerString(self: Algorithm) []const u8 {
-        return strs[@intFromEnum(self)];
+    inline fn header(self: Algorithm) Header {
+        var typ: ?[]const u8 = null;
+        if (self != .none) {
+            typ = "JWT";
+        }
+
+        return .{
+            .alg = strs[@intFromEnum(self)],
+            .typ = typ,
+        };
     }
 };
 
@@ -28,10 +36,7 @@ pub const Codec = struct {
     key: []const u8,
 
     pub fn encode(self: Codec, allocator: Allocator, alg: Algorithm, payload: anytype) ![]const u8 {
-        const header = Header{
-            .alg = alg.headerString(),
-            .typ = "JWT",
-        };
+        const header = alg.header();
 
         var token = std.ArrayList(u8).init(allocator);
         errdefer token.deinit();
@@ -57,7 +62,7 @@ pub const Codec = struct {
     }
 
     fn appendEncodedJSON(self: Codec, allocator: Allocator, val: anytype, arr: *std.ArrayList(u8)) !void {
-        const val_json = try json.stringifyAlloc(allocator, val, .{});
+        const val_json = try json.stringifyAlloc(allocator, val, .{ .emit_null_optional_fields = false });
         defer allocator.free(val_json);
 
         try self.appendEncoded(val_json, arr);
@@ -75,8 +80,9 @@ pub const Codec = struct {
             .none => {},
         }
 
+        (try arr.addOne()).* = '.';
+
         if (sig) |sig_bytes| {
-            (try arr.addOne()).* = '.';
             try self.appendEncoded(sig_bytes, arr);
         }
     }
@@ -94,6 +100,14 @@ test "JWT encode with alg=hs256" {
     try std.testing.expectEqualStrings(expected, enc_str);
 }
 
-test "JWT encode with alg=none" {}
+test "JWT encode with alg=none" {
+    const codec = Codec{ .key = test_secret };
+    const enc_str = try codec.encode(std.testing.allocator, .none, .{ .test_str = "str1" });
+    defer std.testing.allocator.free(enc_str);
+
+    const expected = "eyJhbGciOiJub25lIn0.eyJ0ZXN0X3N0ciI6InN0cjEifQ.";
+
+    try std.testing.expectEqualStrings(expected, enc_str);
+}
 
 test "JWT decode" {}
