@@ -10,11 +10,6 @@ const alg_str_hs256 = "HS256";
 
 const typ_str_jwt = "JWT";
 
-const Header = struct {
-    alg: []const u8,
-    typ: ?[]const u8 = null,
-};
-
 pub const Algorithm = enum(u8) {
     none = 0,
     hs256,
@@ -66,42 +61,6 @@ pub const Codec = struct {
 
         return try token.toOwnedSlice();
     }
-
-    const TokenPieces = struct {
-        header: []const u8,
-        payload: []const u8,
-        signature: []const u8,
-
-        fn fromString(s: []const u8) !TokenPieces {
-            var self = TokenPieces{
-                .header = undefined,
-                .payload = undefined,
-                .signature = undefined,
-            };
-
-            var parts_iter = std.mem.splitScalar(u8, s, '.');
-
-            if (parts_iter.next()) |part| {
-                self.header = part;
-            } else {
-                return error.InvalidFormat;
-            }
-
-            if (parts_iter.next()) |part| {
-                self.payload = part;
-            } else {
-                return error.InvalidFormat;
-            }
-
-            if (parts_iter.next()) |part| {
-                self.signature = part;
-            } else {
-                return error.InvalidFormat;
-            }
-
-            return self;
-        }
-    };
 
     pub fn decode(self: Codec, comptime T: type, allocator: Allocator, s: []const u8) !json.Parsed(T) {
         const token_pieces = try TokenPieces.fromString(s);
@@ -182,6 +141,47 @@ pub const Codec = struct {
         if (sig) |sig_bytes| {
             try self.appendEncoded(sig_bytes, arr);
         }
+    }
+};
+
+const Header = struct {
+    alg: []const u8,
+    typ: ?[]const u8 = null,
+};
+
+const TokenPieces = struct {
+    header: []const u8,
+    payload: []const u8,
+    signature: []const u8,
+
+    fn fromString(s: []const u8) !TokenPieces {
+        var self = TokenPieces{
+            .header = undefined,
+            .payload = undefined,
+            .signature = undefined,
+        };
+
+        var parts_iter = std.mem.splitScalar(u8, s, '.');
+
+        if (parts_iter.next()) |part| {
+            self.header = part;
+        } else {
+            return error.InvalidFormat;
+        }
+
+        if (parts_iter.next()) |part| {
+            self.payload = part;
+        } else {
+            return error.InvalidFormat;
+        }
+
+        if (parts_iter.next()) |part| {
+            self.signature = part;
+        } else {
+            return error.InvalidFormat;
+        }
+
+        return self;
     }
 };
 
