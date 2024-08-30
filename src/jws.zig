@@ -3,7 +3,7 @@ const base64 = std.base64;
 const json = std.json;
 const mem = std.mem;
 
-const signature = @import("algorithms/signature.zig");
+const signature = @import("algorithms.zig").signature;
 
 const Allocator = mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
