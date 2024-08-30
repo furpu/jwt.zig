@@ -10,8 +10,11 @@ const alg_str_hs256 = "HS256";
 
 const typ_str_jwt = "JWT";
 
+/// Supported signature algorithms.
 pub const Algorithm = enum(u8) {
+    /// No signature.
     none = 0,
+    /// HS256 signature.
     hs256,
 
     const strs = [_][]const u8{
@@ -42,13 +45,25 @@ pub const Algorithm = enum(u8) {
     }
 };
 
+/// JWT encoder and decoder.
 pub const Codec = struct {
     _enc: base64.Base64Encoder = base64.Base64Encoder.init(base64.url_safe_no_pad.alphabet_chars, base64.url_safe_no_pad.pad_char),
     _dec: base64.Base64Decoder = base64.Base64Decoder.init(base64.url_safe_no_pad.alphabet_chars, base64.url_safe_no_pad.pad_char),
+
+    /// Signature algorithm key.
     key: []const u8,
 
-    pub fn encode(self: Codec, allocator: Allocator, alg: Algorithm, payload: anytype) ![]const u8 {
-        const header = alg.header();
+    /// Algorithm that will be used to encode and decode JWTs.
+    algorithm: Algorithm,
+
+    /// Returns a JWT containing the given payload.
+    ///
+    /// The signature part of the JWT is created using the Codec's configured algorithm
+    /// and the given key.
+    ///
+    /// The caller owns the memory allocated for the JWT.
+    pub fn encode(self: Codec, allocator: Allocator, payload: anytype) ![]const u8 {
+        const header = self.algorithm.header();
 
         var token = std.ArrayList(u8).init(allocator);
         errdefer token.deinit();
@@ -57,11 +72,14 @@ pub const Codec = struct {
         (try token.addOne()).* = '.';
         try self.appendEncodedJSON(allocator, payload, &token);
 
-        try self.maybeAppendSignature(alg, &token);
+        try self.maybeAppendSignature(self.algorithm, &token);
 
         return try token.toOwnedSlice();
     }
 
+    /// Decodes and verifies a JWT and returns the payload part as a value of type T.
+    ///
+    /// The caller should free the memory of the returned value.
     pub fn decode(self: Codec, comptime T: type, allocator: Allocator, s: []const u8) !json.Parsed(T) {
         const token_pieces = try TokenPieces.fromString(s);
 
@@ -188,8 +206,8 @@ const TokenPieces = struct {
 const test_secret = "testsecret";
 
 test "JWT encode with alg=hs256" {
-    const codec = Codec{ .key = test_secret };
-    const enc_str = try codec.encode(std.testing.allocator, .hs256, .{ .test_str = "str1" });
+    const codec = Codec{ .key = test_secret, .algorithm = .hs256 };
+    const enc_str = try codec.encode(std.testing.allocator, .{ .test_str = "str1" });
     defer std.testing.allocator.free(enc_str);
 
     const expected = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X3N0ciI6InN0cjEifQ.6_xNniyaF5scigAozuaxxdWtdlnI1CAP8OHDTcBi9i8";
@@ -198,8 +216,8 @@ test "JWT encode with alg=hs256" {
 }
 
 test "JWT encode with alg=none" {
-    const codec = Codec{ .key = test_secret };
-    const enc_str = try codec.encode(std.testing.allocator, .none, .{ .test_str = "str1" });
+    const codec = Codec{ .key = &.{}, .algorithm = .none };
+    const enc_str = try codec.encode(std.testing.allocator, .{ .test_str = "str1" });
     defer std.testing.allocator.free(enc_str);
 
     const expected = "eyJhbGciOiJub25lIn0.eyJ0ZXN0X3N0ciI6InN0cjEifQ.";
@@ -208,7 +226,7 @@ test "JWT encode with alg=none" {
 }
 
 test "JWT decode alg=hs256" {
-    const codec = Codec{ .key = test_secret };
+    const codec = Codec{ .key = test_secret, .algorithm = .hs256 };
     const enc_str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X2ZpZWxkIjo1fQ.kwVT7OeKoswn-5rjGKuKr7NUGQx5rAuRA3THFtwqp3Y";
 
     const payload = try codec.decode(struct { test_field: i32 }, std.testing.allocator, enc_str);
@@ -218,7 +236,7 @@ test "JWT decode alg=hs256" {
 }
 
 test "JWT decode alg=none" {
-    const codec = Codec{ .key = test_secret };
+    const codec = Codec{ .key = &.{}, .algorithm = .none };
     const enc_str = "eyJhbGciOiJub25lIn0.eyJ0ZXN0X2ZpZWxkIjo1fQ.";
 
     const payload = try codec.decode(struct { test_field: i32 }, std.testing.allocator, enc_str);
