@@ -17,7 +17,9 @@ pub fn build(b: *std.Build) void {
         "jws-encode-decode",
     };
 
-    inline for (&examples) |example_name| {
+    var readme_example_step: *std.Build.Step = undefined;
+
+    for (&examples, 0..) |example_name, i| {
         const example_exe = b.addExecutable(.{
             .name = example_name,
             .root_source_file = b.path(b.pathJoin(&.{ "examples", b.fmt("{s}.zig", .{example_name}) })),
@@ -29,7 +31,18 @@ pub fn build(b: *std.Build) void {
 
         const example_install = b.addInstallArtifact(example_exe, .{});
         examples_build.dependOn(&example_install.step);
+
+        // Record this so we can use it as a depency for the readme step.
+        if (i == 0) {
+            readme_example_step = &example_exe.step;
+        }
     }
+
+    // Readme
+    const readme_step = b.step("readme", "Updates README.md");
+    const update_readme = readmeStep(b);
+    update_readme.dependOn(readme_example_step);
+    readme_step.dependOn(update_readme);
 
     // Tests
     const exe_unit_tests = b.addTest(.{
@@ -42,4 +55,30 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
+}
+
+fn readmeStep(b: *std.Build) *std.Build.Step {
+    const step = b.allocator.create(std.Build.Step) catch unreachable;
+
+    step.* = std.Build.Step.init(.{
+        .id = .custom,
+        .name = "ReadmeStep",
+        .owner = b,
+        .makeFn = readmeStepMake,
+    });
+
+    return step;
+}
+
+fn readmeStepMake(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
+    const template = @embedFile("README.template.md");
+    const example_code = @embedFile("examples/jws-encode-decode.zig");
+
+    const out_f = try std.fs.cwd().createFile("README.md", .{ .truncate = true });
+    defer out_f.close();
+
+    const out_w = out_f.writer();
+    try out_w.print(template, .{example_code});
+
+    std.debug.print("Generated README.md\n", .{});
 }
