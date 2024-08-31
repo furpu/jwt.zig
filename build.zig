@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
     const examples_build = b.step("examples", "Build all examples");
 
     const examples = [_][]const u8{
-        "jws-encode-decode",
+        "encode-decode",
     };
 
     var readme_example_step: *std.Build.Step = undefined;
@@ -72,7 +72,7 @@ fn readmeStep(b: *std.Build) *std.Build.Step {
 
 fn readmeStepMake(_: *std.Build.Step, _: std.Build.Step.MakeOptions) anyerror!void {
     const template = @embedFile("README.template.md");
-    const example_code = @embedFile("examples/jws-encode-decode.zig");
+    const example_code = @embedFile("examples/encode-decode.zig");
 
     const out_f = try std.fs.cwd().createFile("README.md", .{ .truncate = true });
     defer out_f.close();
