@@ -31,16 +31,19 @@ pub const Algorithm = struct {
 pub const Hs256 = struct {
     secret: []const u8,
 
+    const HmacSha256 = crypto.auth.hmac.sha2.HmacSha256;
+
+    pub const sig_length = HmacSha256.mac_length;
+    pub const alg_str = "HS256";
+
     const vtable = Algorithm.VTable{
         .sign = algorithmSign,
         .verify = algorithmVerify,
     };
 
-    const sig_length = crypto.auth.hmac.sha2.HmacSha256.mac_length;
-
     pub fn sign(self: Hs256, allocator: mem.Allocator, bytes: []const u8) ![]u8 {
         var sig_bytes: [sig_length]u8 = undefined;
-        crypto.auth.hmac.sha2.HmacSha256.create(&sig_bytes, bytes, self.secret);
+        HmacSha256.create(&sig_bytes, bytes, self.secret);
 
         const ret = try allocator.alloc(u8, sig_length);
         @memcpy(ret, sig_bytes[0..]);
@@ -50,7 +53,7 @@ pub const Hs256 = struct {
 
     pub fn verify(self: Hs256, sig_bytes: []const u8, bytes: []const u8) anyerror!bool {
         var computed_sig_bytes: [sig_length]u8 = undefined;
-        crypto.auth.hmac.sha2.HmacSha256.create(&computed_sig_bytes, bytes, self.secret);
+        HmacSha256.create(&computed_sig_bytes, bytes, self.secret);
 
         return mem.eql(u8, &computed_sig_bytes, sig_bytes);
     }
@@ -59,7 +62,7 @@ pub const Hs256 = struct {
         return .{
             ._ptr = self,
             ._vtable = &vtable,
-            .alg_str = "HS256",
+            .alg_str = alg_str,
         };
     }
 
@@ -70,6 +73,80 @@ pub const Hs256 = struct {
 
     fn algorithmVerify(self: *anyopaque, sig_bytes: []const u8, bytes: []const u8) anyerror!bool {
         const this: *const Hs256 = @alignCast(@ptrCast(self));
+        return this.verify(sig_bytes, bytes);
+    }
+};
+
+/// ES256 signer and verifier.
+pub const Es256 = struct {
+    keypair: EcdsaP256Sha256.KeyPair,
+
+    const EcdsaP256Sha256 = crypto.sign.ecdsa.EcdsaP256Sha256;
+
+    pub const seed_length = EcdsaP256Sha256.KeyPair.seed_length;
+    pub const sig_length = EcdsaP256Sha256.Signature.encoded_length;
+    pub const alg_str = "ES256";
+
+    const vtable = Algorithm.VTable{
+        .sign = algorithmSign,
+        .verify = algorithmVerify,
+    };
+
+    pub inline fn create(seed: [seed_length]u8) !Es256 {
+        const keypair = try EcdsaP256Sha256.KeyPair.create(seed);
+        return Es256{ .keypair = keypair };
+    }
+
+    pub inline fn generate() !Es256 {
+        const keypair = try EcdsaP256Sha256.KeyPair.generate();
+        return Es256{ .keypair = keypair };
+    }
+
+    pub fn sign(self: Es256, allocator: mem.Allocator, bytes: []const u8) ![]u8 {
+        // TODO: Should noise be used in this case?
+        const sig = try self.keypair.sign(bytes, null);
+
+        const ret = try allocator.alloc(u8, sig_length);
+        @memcpy(ret, &sig.toBytes());
+
+        return ret;
+    }
+
+    pub fn verify(self: Es256, sig_bytes: []const u8, bytes: []const u8) !bool {
+        if (sig_bytes.len != sig_length) {
+            return error.InvalidSignatureLength;
+        }
+
+        var sig_bytes_arr: [sig_length]u8 = undefined;
+        @memcpy(&sig_bytes_arr, sig_bytes);
+
+        const sig = EcdsaP256Sha256.Signature.fromBytes(sig_bytes_arr);
+
+        sig.verify(bytes, self.keypair.public_key) catch |err| {
+            switch (err) {
+                error.SignatureVerificationFailed => return false,
+                else => return err,
+            }
+        };
+
+        return true;
+    }
+
+    pub fn algorithm(self: *Es256) Algorithm {
+        return Algorithm{
+            ._ptr = self,
+            ._vtable = &vtable,
+            .alg_str = alg_str,
+        };
+    }
+
+    fn algorithmSign(self: *anyopaque, allocator: mem.Allocator, bytes: []const u8) anyerror![]u8 {
+        const this: *Es256 = @alignCast(@ptrCast(self));
+        return this.sign(allocator, bytes);
+    }
+
+    fn algorithmVerify(self: *anyopaque, sig_bytes: []const u8, bytes: []const u8) anyerror!bool {
+        const this: *Es256 = @alignCast(@ptrCast(self));
         return this.verify(sig_bytes, bytes);
     }
 };

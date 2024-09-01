@@ -75,19 +75,39 @@ pub const Codec = struct {
         jwt_arena_alloc.* = ArenaAllocator.init(allocator);
         const jwt_arena = jwt_arena_alloc.allocator();
 
+        var decoded = Decoded(PayloadT){
+            .arena = jwt_arena_alloc,
+            .header = undefined,
+            .payload = undefined,
+        };
+        errdefer decoded.deinit();
+
         // Decode and parse header so we know which algorithm to use
         const header_json = try allocator.alloc(u8, try self._dec.calcSizeForSlice(token_pieces.header));
         defer allocator.free(header_json);
 
         try self._dec.decode(header_json, token_pieces.header);
-        const header = try json.parseFromSliceLeaky(Header, jwt_arena, header_json, .{ .allocate = .alloc_always });
+        decoded.header = try json.parseFromSliceLeaky(Header, jwt_arena, header_json, .{ .allocate = .alloc_always });
 
         // Check signature
         if (self.sig_algorithm) |alg| {
-            if (!mem.eql(u8, alg.alg_str, header.alg)) {
+            if (!mem.eql(u8, alg.alg_str, decoded.header.alg)) {
                 return error.WrongAlg;
             }
-        } else if (!mem.eql(u8, "none", header.alg)) {
+
+            const sig_bytes = try allocator.alloc(u8, try self._dec.calcSizeForSlice(token_pieces.signature));
+            defer allocator.free(sig_bytes);
+
+            try self._dec.decode(sig_bytes, token_pieces.signature);
+
+            // Index at which the signature starts in s
+            // len(header) + len(".") + len(payload)
+            const sig_begin = token_pieces.header.len + token_pieces.payload.len + 1;
+
+            if (!try alg.verify(sig_bytes, s[0..sig_begin])) {
+                return error.InvalidSignature;
+            }
+        } else if (!mem.eql(u8, "none", decoded.header.alg)) {
             return error.WrongAlg;
         }
 
@@ -96,13 +116,9 @@ pub const Codec = struct {
         defer allocator.free(payload_json);
 
         try self._dec.decode(payload_json, token_pieces.payload);
-        const payload = try json.parseFromSliceLeaky(PayloadT, jwt_arena, payload_json, .{ .allocate = .alloc_always });
+        decoded.payload = try json.parseFromSliceLeaky(PayloadT, jwt_arena, payload_json, .{ .allocate = .alloc_always });
 
-        return Decoded(PayloadT){
-            .arena = jwt_arena_alloc,
-            .header = header,
-            .payload = payload,
-        };
+        return decoded;
     }
 
     fn appendEncoded(self: Codec, bs: []const u8, arr: *std.ArrayList(u8)) !void {
@@ -175,15 +191,28 @@ const TokenPieces = struct {
 };
 
 const test_secret = "testsecret";
-var test_hs256 = signature.Hs256{ .secret = test_secret };
+const test_ecdsa_seed: [signature.Es256.seed_length]u8 = [_]u8{'f'} ** 32;
 
-test "JWT encode with alg=hs256" {
+test "JWT encode with alg=HS256" {
+    var test_hs256 = signature.Hs256{ .secret = test_secret };
     const codec = Codec{ .sig_algorithm = test_hs256.algorithm() };
 
     const enc_str = try codec.encode(std.testing.allocator, .{ .test_str = "str1" });
     defer std.testing.allocator.free(enc_str);
 
     const expected = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X3N0ciI6InN0cjEifQ.6_xNniyaF5scigAozuaxxdWtdlnI1CAP8OHDTcBi9i8";
+
+    try std.testing.expectEqualStrings(expected, enc_str);
+}
+
+test "JWT encode with alg=ES256" {
+    var test_es256 = try signature.Es256.create(test_ecdsa_seed);
+    const codec = Codec{ .sig_algorithm = test_es256.algorithm() };
+
+    const enc_str = try codec.encode(std.testing.allocator, .{ .test_str = "str1" });
+    defer std.testing.allocator.free(enc_str);
+
+    const expected = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X3N0ciI6InN0cjEifQ.6_xNniyaF5scigAozuaxxdWtdlnI1CAP8OHDTcBi9i8";
 
     try std.testing.expectEqualStrings(expected, enc_str);
 }
@@ -198,9 +227,21 @@ test "JWT encode with alg=none" {
     try std.testing.expectEqualStrings(expected, enc_str);
 }
 
-test "JWT decode alg=hs256" {
+test "JWT decode alg=HS256" {
+    var test_hs256 = signature.Hs256{ .secret = test_secret };
     const codec = Codec{ .sig_algorithm = test_hs256.algorithm() };
     const enc_str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X2ZpZWxkIjo1fQ.kwVT7OeKoswn-5rjGKuKr7NUGQx5rAuRA3THFtwqp3Y";
+
+    const dec_jwt = try codec.decode(struct { test_field: i32 }, std.testing.allocator, enc_str);
+    defer dec_jwt.deinit();
+
+    try std.testing.expectEqual(5, dec_jwt.payload.test_field);
+}
+
+test "JWT decode alg=ES256" {
+    var test_es256 = try signature.Es256.create(test_ecdsa_seed);
+    const codec = Codec{ .sig_algorithm = test_es256.algorithm() };
+    const enc_str = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X2ZpZWxkIjo1fQ.kwVT7OeKoswn-5rjGKuKr7NUGQx5rAuRA3THFtwqp3Y";
 
     const dec_jwt = try codec.decode(struct { test_field: i32 }, std.testing.allocator, enc_str);
     defer dec_jwt.deinit();
