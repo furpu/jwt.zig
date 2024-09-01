@@ -1,4 +1,4 @@
-# ziwt
+# jwt.zig
 Zig implementation of JSON Web Tokens ([RFC 7519](https://datatracker.ietf.org/doc/html/rfc7519)).
 
 ## Example

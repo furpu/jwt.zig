@@ -4,8 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const ziwt = b.addModule("ziwt", .{
-        .root_source_file = b.path("src/ziwt.zig"),
+    const jwt = b.addModule("jwt", .{
+        .root_source_file = b.path("src/jwt.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
 
-        example_exe.root_module.addImport("ziwt", ziwt);
+        example_exe.root_module.addImport("jwt", jwt);
 
         const example_install = b.addInstallArtifact(example_exe, .{});
         examples_build.dependOn(&example_install.step);
@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
 
     // Tests
     const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("tests.zig"),
+        .root_source_file = b.path("src/jwt.zig"),
         .target = target,
         .optimize = optimize,
     });

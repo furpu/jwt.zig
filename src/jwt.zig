@@ -190,6 +190,10 @@ const TokenPieces = struct {
     }
 };
 
+test {
+    _ = @import("algorithms.zig");
+}
+
 const test_secret = "testsecret";
 const test_ecdsa_seed: [signature.Es256.seed_length]u8 = [_]u8{'f'} ** 32;
 
