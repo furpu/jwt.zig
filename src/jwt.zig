@@ -34,11 +34,11 @@ pub fn Decoded(comptime PayloadT: type) type {
 
 /// JWT encoder and decoder.
 pub const Codec = struct {
-    _enc: base64.Base64Encoder = base64.Base64Encoder.init(base64.url_safe_no_pad.alphabet_chars, base64.url_safe_no_pad.pad_char),
-    _dec: base64.Base64Decoder = base64.Base64Decoder.init(base64.url_safe_no_pad.alphabet_chars, base64.url_safe_no_pad.pad_char),
-
     /// Signature algorithm used to sign and verify the encoded/decoded JWT signatures.
     sig_algorithm: ?signature.Algorithm = null,
+
+    const encoder = std.base64.url_safe_no_pad.Encoder;
+    const decoder = std.base64.url_safe_no_pad.Decoder;
 
     /// Returns a JWT containing the given payload.
     ///
@@ -56,9 +56,9 @@ pub const Codec = struct {
         var token = std.ArrayList(u8).init(allocator);
         errdefer token.deinit();
 
-        try self.appendEncodedJSON(allocator, header, &token);
+        try appendEncodedJSON(allocator, header, &token);
         (try token.addOne()).* = '.';
-        try self.appendEncodedJSON(allocator, payload, &token);
+        try appendEncodedJSON(allocator, payload, &token);
 
         try self.maybeAppendSignature(allocator, &token);
 
@@ -83,10 +83,10 @@ pub const Codec = struct {
         errdefer decoded.deinit();
 
         // Decode and parse header so we know which algorithm to use
-        const header_json = try allocator.alloc(u8, try self._dec.calcSizeForSlice(token_pieces.header));
+        const header_json = try allocator.alloc(u8, try decoder.calcSizeForSlice(token_pieces.header));
         defer allocator.free(header_json);
 
-        try self._dec.decode(header_json, token_pieces.header);
+        try decoder.decode(header_json, token_pieces.header);
         decoded.header = try json.parseFromSliceLeaky(Header, jwt_arena, header_json, .{ .allocate = .alloc_always });
 
         // Check signature
@@ -95,10 +95,10 @@ pub const Codec = struct {
                 return error.WrongAlg;
             }
 
-            const sig_bytes = try allocator.alloc(u8, try self._dec.calcSizeForSlice(token_pieces.signature));
+            const sig_bytes = try allocator.alloc(u8, try decoder.calcSizeForSlice(token_pieces.signature));
             defer allocator.free(sig_bytes);
 
-            try self._dec.decode(sig_bytes, token_pieces.signature);
+            try decoder.decode(sig_bytes, token_pieces.signature);
 
             // Index at which the signature starts in s
             // len(header) + len(".") + len(payload)
@@ -112,25 +112,25 @@ pub const Codec = struct {
         }
 
         // Decode and parse the payload
-        const payload_json = try allocator.alloc(u8, try self._dec.calcSizeForSlice(token_pieces.payload));
+        const payload_json = try allocator.alloc(u8, try decoder.calcSizeForSlice(token_pieces.payload));
         defer allocator.free(payload_json);
 
-        try self._dec.decode(payload_json, token_pieces.payload);
+        try decoder.decode(payload_json, token_pieces.payload);
         decoded.payload = try json.parseFromSliceLeaky(PayloadT, jwt_arena, payload_json, .{ .allocate = .alloc_always });
 
         return decoded;
     }
 
-    fn appendEncoded(self: Codec, bs: []const u8, arr: *std.ArrayList(u8)) !void {
-        const slice = try arr.addManyAsSlice(self._enc.calcSize(bs.len));
-        _ = self._enc.encode(slice, bs);
+    fn appendEncoded(bs: []const u8, arr: *std.ArrayList(u8)) !void {
+        const slice = try arr.addManyAsSlice(encoder.calcSize(bs.len));
+        _ = encoder.encode(slice, bs);
     }
 
-    fn appendEncodedJSON(self: Codec, allocator: Allocator, val: anytype, arr: *std.ArrayList(u8)) !void {
+    fn appendEncodedJSON(allocator: Allocator, val: anytype, arr: *std.ArrayList(u8)) !void {
         const val_json = try json.stringifyAlloc(allocator, val, .{ .emit_null_optional_fields = false });
         defer allocator.free(val_json);
 
-        try self.appendEncoded(val_json, arr);
+        try appendEncoded(val_json, arr);
     }
 
     fn maybeAppendSignature(self: Codec, allocator: Allocator, arr: *std.ArrayList(u8)) !void {
@@ -148,7 +148,7 @@ pub const Codec = struct {
         (try arr.addOne()).* = '.';
 
         if (sig) |sig_bytes| {
-            try self.appendEncoded(sig_bytes, arr);
+            try appendEncoded(sig_bytes, arr);
         }
     }
 };
@@ -191,7 +191,9 @@ const TokenPieces = struct {
 };
 
 test {
-    _ = @import("algorithms.zig");
+    comptime {
+        std.testing.refAllDeclsRecursive(@This());
+    }
 }
 
 const test_secret = "testsecret";
