@@ -11,8 +11,32 @@ const Header = struct {
     cty: ?[]const u8 = null,
 };
 
-pub const Signer = struct {};
-pub const Verifier = struct {};
+pub const Signer = struct {
+    ptr: *anyopaque,
+    vtable: VTable,
+    alg_str: []const u8,
+
+    pub const VTable = struct {
+        sign_fn: *const fn (self: *anyopaque, bytes: []const u8, writer: std.io.AnyWriter) anyerror!void,
+    };
+
+    pub fn sign(self: Signer, bytes: []const u8, writer: std.io.AnyWriter) anyerror!void {
+        return self.vtable.sign_fn(self.ptr, bytes, writer);
+    }
+};
+
+pub const Verifier = struct {
+    ptr: *anyopaque,
+    vtable: VTable,
+
+    pub const VTable = struct {
+        verify_fn: *const fn (self: *anyopaque, bytes: []const u8, signature: []const u8) anyerror!bool,
+    };
+
+    pub fn verify(self: Verifier, bytes: []const u8, signature: []const u8) anyerror!bool {
+        return self.vtable.verify_fn(self.ptr, bytes, signature);
+    }
+};
 
 pub const Encoder = struct {
     signer: ?Signer,
@@ -24,8 +48,8 @@ pub const Encoder = struct {
 
     pub fn encode(self: Encoder, comptime T: type, allocator: Allocator, claim_set: T) ![]const u8 {
         var header: Header = undefined;
-        if (self.signer) |_| {
-            return error.NotImplemented;
+        if (self.signer) |signer| {
+            header = .{ .alg = signer.alg_str };
         } else {
             header = .{ .alg = "none", .typ = null };
         }
@@ -36,19 +60,28 @@ pub const Encoder = struct {
         const encoded_buffer_writer = encoded_buffer.writer().any();
 
         // Create a buffer to use for stringifying data into JSON
-        var json_buffer = try std.ArrayList(u8).initCapacity(allocator, 1024);
-        defer json_buffer.deinit();
+        var buffer = try std.ArrayList(u8).initCapacity(allocator, 1024);
+        defer buffer.deinit();
 
         // Stringify and encode header
-        try json.stringify(header, json_strigify_opts, json_buffer.writer().any());
-        try b64_encoder.encodeWriter(encoded_buffer_writer, json_buffer.items);
+        try json.stringify(header, json_strigify_opts, buffer.writer().any());
+        try b64_encoder.encodeWriter(encoded_buffer_writer, buffer.items);
         try encoded_buffer_writer.writeByte(part_separator);
 
         // Stringify and encode claim set
-        json_buffer.clearRetainingCapacity();
-        try json.stringify(claim_set, json_strigify_opts, json_buffer.writer().any());
-        try b64_encoder.encodeWriter(encoded_buffer_writer, json_buffer.items);
-        try encoded_buffer_writer.writeByte(part_separator);
+        buffer.clearRetainingCapacity();
+        try json.stringify(claim_set, json_strigify_opts, buffer.writer().any());
+        try b64_encoder.encodeWriter(encoded_buffer_writer, buffer.items);
+
+        // Add signature if signer is present
+        if (self.signer) |signer| {
+            buffer.clearRetainingCapacity();
+            try signer.sign(encoded_buffer.items, buffer.writer().any());
+            try encoded_buffer_writer.writeByte(part_separator);
+            try b64_encoder.encodeWriter(encoded_buffer_writer, buffer.items);
+        } else {
+            try encoded_buffer_writer.writeByte(part_separator);
+        }
 
         return try encoded_buffer.toOwnedSlice();
     }
@@ -63,9 +96,11 @@ pub const Decoder = struct {
 
     pub fn decode(self: Decoder, comptime T: type, allocator: Allocator, encoded: []const u8) !json.Parsed(T) {
         var part_iter = std.mem.splitScalar(u8, encoded, '.');
+        var parts_len: usize = 0;
 
         var header: json.Parsed(Header) = undefined;
         if (part_iter.next()) |encoded_header| {
+            parts_len += encoded_header.len + 1;
             header = try parseBase64Json(Header, allocator, encoded_header);
         } else {
             return error.MissingHeader;
@@ -74,13 +109,28 @@ pub const Decoder = struct {
 
         var claim_set: json.Parsed(T) = undefined;
         if (part_iter.next()) |encoded_claim_set| {
+            parts_len += encoded_claim_set.len;
             claim_set = try parseBase64Json(T, allocator, encoded_claim_set);
         } else {
             return error.MissingClaimSet;
         }
         errdefer claim_set.deinit();
 
-        _ = self;
+        if (self.verifier) |verifier| {
+            if (part_iter.next()) |encoded_signature| {
+                const decode_len = try b64_decoder.calcSizeForSlice(encoded_signature);
+                const decode_buf = try allocator.alloc(u8, decode_len);
+                defer allocator.free(decode_buf);
+
+                try b64_decoder.decode(decode_buf, encoded_signature);
+
+                const valid = try verifier.verify(encoded[0..parts_len], decode_buf);
+                if (!valid) return error.InvalidSignature;
+            } else {
+                return error.MissingSignature;
+            }
+        }
+
         return claim_set;
     }
 
