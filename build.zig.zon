@@ -2,7 +2,12 @@
     .name = "ziwt",
     .version = "0.1.0",
     .minimum_zig_version = "0.14.0-dev.1232+61919fe63",
-    .dependencies = .{},
+    .dependencies = .{
+        .cricket = .{
+            .url = "git+https://github.com/furpu/cricket.zig#4297ee5c845a8486191806fa102302695d3ff941",
+            .hash = "122041978fdf29d868a72d0f7749b536650441c642c7d64178f297e71b2e808fc9cd",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
