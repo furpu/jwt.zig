@@ -122,8 +122,7 @@ test {
     std.testing.refAllDeclsRecursive(@This());
 }
 
-// TODO: Move this to be executed inside each of the signer tests (maybe by providing the signer as an arg to the test fn?)
-test "encode does not leak" {
+test "encode with alg=none does not leak" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testEncodeMemoryErrors, .{});
 }
 
@@ -153,8 +152,7 @@ test "encode with alg=none" {
     try std.testing.expectEqualStrings(expected, encoded);
 }
 
-// TODO: Move this to be executed inside each of the verifier tests (maybe by providing the verifier as an arg to the test fn?)
-test "decode does not leak" {
+test "decode with alg=none does not leak" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testDecodeMemoryErrors, .{});
 }
 

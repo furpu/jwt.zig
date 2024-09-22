@@ -16,6 +16,32 @@ pub fn build(b: *std.Build) void {
     });
     jwt.addImport("cricket", cricket.module("cricket"));
 
+    // Examples
+    const example_step = b.step("examples", "Build examples");
+    const example_filenames = [_][]const u8{
+        "encode.zig",
+        "decode.zig",
+    };
+
+    for (example_filenames) |filename| {
+        const example_name = blk: {
+            var iter = std.mem.splitScalar(u8, filename, '.');
+            break :blk iter.next().?;
+        };
+
+        const example_exe = b.addExecutable(.{
+            .name = example_name,
+            .root_source_file = b.path(b.pathJoin(&.{ "examples", filename })),
+            .target = target,
+            .optimize = optimize,
+        });
+        example_exe.root_module.addImport("jwt", jwt);
+
+        const install_example_exe = b.addInstallArtifact(example_exe, .{});
+
+        example_step.dependOn(&install_example_exe.step);
+    }
+
     // Tests
     const unit_tests = b.addTest(.{
         .root_source_file = b.path("src/jwt.zig"),
