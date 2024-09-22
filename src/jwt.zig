@@ -1,268 +1,189 @@
-pub const algorithms = @import("algorithms.zig");
-
 const std = @import("std");
 const base64 = std.base64;
 const json = std.json;
-const mem = std.mem;
+const Allocator = std.mem.Allocator;
 
-const signature = algorithms.signature;
+pub const algorithms = @import("algorithms.zig");
 
-const Allocator = mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
+const b64_encoder = base64.url_safe_no_pad.Encoder;
+const b64_decoder = base64.url_safe_no_pad.Decoder;
+const json_strigify_opts: json.StringifyOptions = .{ .emit_null_optional_fields = false };
+const part_separator: u8 = '.';
 
-/// JWT header.
-pub const Header = struct {
+const Header = struct {
     alg: []const u8,
-    typ: ?[]const u8 = null,
+    typ: ?[]const u8 = "JWT",
+    cty: ?[]const u8 = null,
 };
 
-/// Decoded JWT header and payload.
-pub fn Decoded(comptime PayloadT: type) type {
-    return struct {
-        arena: *ArenaAllocator,
-        header: Header,
-        payload: PayloadT,
+pub fn encode(allocator: Allocator, claim_set: anytype, signer: anytype) ![]const u8 {
+    const SignerT = @TypeOf(signer);
 
-        const Self = @This();
-
-        pub fn deinit(self: Self) void {
-            self.arena.deinit();
-            self.arena.child_allocator.destroy(self.arena);
-        }
+    const is_null_signer = switch (@typeInfo(SignerT)) {
+        .null => true,
+        else => false,
     };
+
+    var signature_length: usize = 0;
+    var header: Header = .{ .alg = "none", .typ = null };
+    if (!is_null_signer) {
+        signature_length = SignerT.signature_length;
+        header = .{ .alg = SignerT.alg_str };
+    }
+
+    // Create a buffer to store the encoded JWT
+    var encoded_buffer = std.ArrayList(u8).init(allocator);
+    errdefer encoded_buffer.deinit();
+    const encoded_buffer_writer = encoded_buffer.writer().any();
+
+    // Create a buffer to use for stringifying data into JSON
+    var buffer = try std.ArrayList(u8).initCapacity(allocator, 1024);
+    defer buffer.deinit();
+
+    // Stringify and encode header
+    try json.stringify(header, json_strigify_opts, buffer.writer().any());
+    try b64_encoder.encodeWriter(encoded_buffer_writer, buffer.items);
+    try encoded_buffer_writer.writeByte(part_separator);
+
+    // Stringify and encode claim set
+    buffer.clearRetainingCapacity();
+    try json.stringify(claim_set, json_strigify_opts, buffer.writer().any());
+    try b64_encoder.encodeWriter(encoded_buffer_writer, buffer.items);
+
+    // Add signature if signer is present
+    if (is_null_signer) {
+        try encoded_buffer_writer.writeByte(part_separator);
+    } else {
+        buffer.clearRetainingCapacity();
+        try buffer.appendNTimes(0, signature_length);
+        try signer.sign(encoded_buffer.items, buffer.items);
+        try encoded_buffer_writer.writeByte(part_separator);
+        try b64_encoder.encodeWriter(encoded_buffer_writer, buffer.items);
+    }
+
+    return try encoded_buffer.toOwnedSlice();
 }
 
-/// JWT encoder and decoder.
-pub const Codec = struct {
-    /// Signature algorithm used to sign and verify the encoded/decoded JWT signatures.
-    sig_algorithm: ?signature.Algorithm = null,
+pub fn decode(comptime T: type, allocator: Allocator, encoded: []const u8, verifier: anytype) !json.Parsed(T) {
+    var part_iter = std.mem.splitScalar(u8, encoded, '.');
+    var parts_len: usize = 0;
 
-    const encoder = std.base64.url_safe_no_pad.Encoder;
-    const decoder = std.base64.url_safe_no_pad.Decoder;
-
-    /// Returns a JWT containing the given payload.
-    ///
-    /// The signature part of the JWT is created using the Codec's configured algorithm
-    /// and the given key.
-    ///
-    /// The caller owns the memory allocated for the JWT.
-    pub fn encode(self: Codec, allocator: Allocator, payload: anytype) ![]const u8 {
-        var header = Header{ .alg = "none" };
-        if (self.sig_algorithm) |alg| {
-            header.alg = alg.alg_str;
-            header.typ = "JWT";
-        }
-
-        var token = std.ArrayList(u8).init(allocator);
-        errdefer token.deinit();
-
-        try appendEncodedJSON(allocator, header, &token);
-        (try token.addOne()).* = '.';
-        try appendEncodedJSON(allocator, payload, &token);
-
-        try self.maybeAppendSignature(allocator, &token);
-
-        return try token.toOwnedSlice();
+    var header: json.Parsed(Header) = undefined;
+    if (part_iter.next()) |encoded_header| {
+        parts_len += encoded_header.len + 1;
+        header = try parseBase64Json(Header, allocator, encoded_header);
+    } else {
+        return error.MissingHeader;
     }
+    defer header.deinit();
 
-    /// Decodes and verifies a JWT and returns the payload part as a value of type T.
-    ///
-    /// The caller should free the memory of the returned value.
-    pub fn decode(self: Codec, comptime PayloadT: type, allocator: Allocator, s: []const u8) !Decoded(PayloadT) {
-        const token_pieces = try TokenPieces.fromString(s);
-
-        const jwt_arena_alloc = try allocator.create(ArenaAllocator);
-        jwt_arena_alloc.* = ArenaAllocator.init(allocator);
-        const jwt_arena = jwt_arena_alloc.allocator();
-
-        var decoded = Decoded(PayloadT){
-            .arena = jwt_arena_alloc,
-            .header = undefined,
-            .payload = undefined,
-        };
-        errdefer decoded.deinit();
-
-        // Decode and parse header so we know which algorithm to use
-        const header_json = try allocator.alloc(u8, try decoder.calcSizeForSlice(token_pieces.header));
-        defer allocator.free(header_json);
-
-        try decoder.decode(header_json, token_pieces.header);
-        decoded.header = try json.parseFromSliceLeaky(Header, jwt_arena, header_json, .{ .allocate = .alloc_always });
-
-        // Check signature
-        if (self.sig_algorithm) |alg| {
-            if (!mem.eql(u8, alg.alg_str, decoded.header.alg)) {
-                return error.WrongAlg;
-            }
-
-            const sig_bytes = try allocator.alloc(u8, try decoder.calcSizeForSlice(token_pieces.signature));
-            defer allocator.free(sig_bytes);
-
-            try decoder.decode(sig_bytes, token_pieces.signature);
-
-            // Index at which the signature starts in s
-            // len(header) + len(".") + len(payload)
-            const sig_begin = token_pieces.header.len + token_pieces.payload.len + 1;
-
-            if (!try alg.verify(sig_bytes, s[0..sig_begin])) {
-                return error.InvalidSignature;
-            }
-        } else if (!mem.eql(u8, "none", decoded.header.alg)) {
-            return error.WrongAlg;
-        }
-
-        // Decode and parse the payload
-        const payload_json = try allocator.alloc(u8, try decoder.calcSizeForSlice(token_pieces.payload));
-        defer allocator.free(payload_json);
-
-        try decoder.decode(payload_json, token_pieces.payload);
-        decoded.payload = try json.parseFromSliceLeaky(PayloadT, jwt_arena, payload_json, .{ .allocate = .alloc_always });
-
-        return decoded;
+    var claim_set: json.Parsed(T) = undefined;
+    if (part_iter.next()) |encoded_claim_set| {
+        parts_len += encoded_claim_set.len;
+        claim_set = try parseBase64Json(T, allocator, encoded_claim_set);
+    } else {
+        return error.MissingClaimSet;
     }
+    errdefer claim_set.deinit();
 
-    fn appendEncoded(bs: []const u8, arr: *std.ArrayList(u8)) !void {
-        const slice = try arr.addManyAsSlice(encoder.calcSize(bs.len));
-        _ = encoder.encode(slice, bs);
-    }
+    const is_null_verifier = switch (@typeInfo(@TypeOf(verifier))) {
+        .null => true,
+        else => false,
+    };
 
-    fn appendEncodedJSON(allocator: Allocator, val: anytype, arr: *std.ArrayList(u8)) !void {
-        const val_json = try json.stringifyAlloc(allocator, val, .{ .emit_null_optional_fields = false });
-        defer allocator.free(val_json);
+    if (!is_null_verifier) {
+        if (part_iter.next()) |encoded_signature| {
+            const decode_len = try b64_decoder.calcSizeForSlice(encoded_signature);
+            const decode_buf = try allocator.alloc(u8, decode_len);
+            defer allocator.free(decode_buf);
 
-        try appendEncoded(val_json, arr);
-    }
+            try b64_decoder.decode(decode_buf, encoded_signature);
 
-    fn maybeAppendSignature(self: Codec, allocator: Allocator, arr: *std.ArrayList(u8)) !void {
-        var sig: ?[]u8 = null;
-        defer {
-            if (sig) |sig_ptr| {
-                allocator.free(sig_ptr);
-            }
-        }
-
-        if (self.sig_algorithm) |alg| {
-            sig = try alg.sign(allocator, arr.items);
-        }
-
-        (try arr.addOne()).* = '.';
-
-        if (sig) |sig_bytes| {
-            try appendEncoded(sig_bytes, arr);
-        }
-    }
-};
-
-/// Used internally to parse the JWT string parts.
-const TokenPieces = struct {
-    header: []const u8,
-    payload: []const u8,
-    signature: []const u8,
-
-    fn fromString(s: []const u8) !TokenPieces {
-        var self = TokenPieces{
-            .header = undefined,
-            .payload = undefined,
-            .signature = undefined,
-        };
-
-        var parts_iter = std.mem.splitScalar(u8, s, '.');
-
-        if (parts_iter.next()) |part| {
-            self.header = part;
+            const valid = try verifier.verify(encoded[0..parts_len], decode_buf);
+            if (!valid) return error.InvalidSignature;
         } else {
-            return error.InvalidFormat;
+            return error.MissingSignature;
         }
-
-        if (parts_iter.next()) |part| {
-            self.payload = part;
-        } else {
-            return error.InvalidFormat;
-        }
-
-        if (parts_iter.next()) |part| {
-            self.signature = part;
-        } else {
-            return error.InvalidFormat;
-        }
-
-        return self;
     }
-};
+
+    return claim_set;
+}
+
+fn parseBase64Json(comptime T: type, allocator: Allocator, encoded: []const u8) !json.Parsed(T) {
+    const decoded_len = try b64_decoder.calcSizeForSlice(encoded);
+    const buf = try allocator.alloc(u8, decoded_len);
+    defer allocator.free(buf);
+
+    try b64_decoder.decode(buf, encoded);
+    return json.parseFromSlice(T, allocator, buf, .{ .allocate = .alloc_always });
+}
 
 test {
-    comptime {
-        std.testing.refAllDeclsRecursive(@This());
-    }
+    std.testing.refAllDeclsRecursive(@This());
 }
 
-const test_secret = "testsecret";
-const test_ecdsa_seed: [signature.Es256.seed_length]u8 = [_]u8{'f'} ** 32;
-
-test "JWT encode with alg=HS256" {
-    var test_hs256 = signature.Hs256{ .secret = test_secret };
-    const codec = Codec{ .sig_algorithm = test_hs256.algorithm() };
-
-    const enc_str = try codec.encode(std.testing.allocator, .{ .test_str = "str1" });
-    defer std.testing.allocator.free(enc_str);
-
-    const expected = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X3N0ciI6InN0cjEifQ.6_xNniyaF5scigAozuaxxdWtdlnI1CAP8OHDTcBi9i8";
-
-    try std.testing.expectEqualStrings(expected, enc_str);
+test "encode with alg=none does not leak" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testEncodeMemoryErrors, .{});
 }
 
-// TODO: https://github.com/furpu/jwt.zig/issues/8
-// test "JWT encode with alg=ES256" {
-//     var test_es256 = try signature.Es256.create(test_ecdsa_seed);
-//     const codec = Codec{ .sig_algorithm = test_es256.algorithm() };
-//
-//     const enc_str = try codec.encode(std.testing.allocator, .{ .test_str = "str1" });
-//     defer std.testing.allocator.free(enc_str);
-//
-//     const expected = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X3N0ciI6InN0cjEifQ.6_xNniyaF5scigAozuaxxdWtdlnI1CAP8OHDTcBi9i8";
-//
-//     try std.testing.expectEqualStrings(expected, enc_str);
-// }
-
-test "JWT encode with alg=none" {
-    const codec = Codec{};
-    const enc_str = try codec.encode(std.testing.allocator, .{ .test_str = "str1" });
-    defer std.testing.allocator.free(enc_str);
-
-    const expected = "eyJhbGciOiJub25lIn0.eyJ0ZXN0X3N0ciI6InN0cjEifQ.";
-
-    try std.testing.expectEqualStrings(expected, enc_str);
+fn testEncodeMemoryErrors(allocator: Allocator) !void {
+    const claim_set = .{
+        .iss = "joe",
+        .exp = 1300819380,
+        .@"http://example.com/is_root" = true,
+    };
+    const encoded = try encode(allocator, claim_set, null);
+    defer std.testing.allocator.free(encoded);
 }
 
-test "JWT decode alg=HS256" {
-    var test_hs256 = signature.Hs256{ .secret = test_secret };
-    const codec = Codec{ .sig_algorithm = test_hs256.algorithm() };
-    const enc_str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X2ZpZWxkIjo1fQ.kwVT7OeKoswn-5rjGKuKr7NUGQx5rAuRA3THFtwqp3Y";
+test "encode with alg=none" {
+    // Test example from https://datatracker.ietf.org/doc/html/rfc7519#section-6.1
+    // NOTE: I re-encoded the JWT after removing the claim set whitespaces.
+    const expected = "eyJhbGciOiJub25lIn0.eyJpc3MiOiJqb2UiLCJleHAiOjEzMDA4MTkzODAsImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.";
 
-    const dec_jwt = try codec.decode(struct { test_field: i32 }, std.testing.allocator, enc_str);
-    defer dec_jwt.deinit();
+    const claim_set = .{
+        .iss = "joe",
+        .exp = 1300819380,
+        .@"http://example.com/is_root" = true,
+    };
+    const encoded = try encode(std.testing.allocator, claim_set, null);
+    defer std.testing.allocator.free(encoded);
 
-    try std.testing.expectEqual(5, dec_jwt.payload.test_field);
+    try std.testing.expectEqualStrings(expected, encoded);
 }
 
-// TODO: https://github.com/furpu/jwt.zig/issues/8
-// test "JWT decode alg=ES256" {
-//     var test_es256 = try signature.Es256.create(test_ecdsa_seed);
-//     const codec = Codec{ .sig_algorithm = test_es256.algorithm() };
-//     const enc_str = "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0ZXN0X2ZpZWxkIjo1fQ.kwVT7OeKoswn-5rjGKuKr7NUGQx5rAuRA3THFtwqp3Y";
-//
-//     const dec_jwt = try codec.decode(struct { test_field: i32 }, std.testing.allocator, enc_str);
-//     defer dec_jwt.deinit();
-//
-//     try std.testing.expectEqual(5, dec_jwt.payload.test_field);
-// }
+test "decode with alg=none does not leak" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testDecodeMemoryErrors, .{});
+}
 
-test "JWT decode alg=none" {
-    const codec = Codec{};
-    const enc_str = "eyJhbGciOiJub25lIn0.eyJ0ZXN0X2ZpZWxkIjo1fQ.";
+fn testDecodeMemoryErrors(allocator: Allocator) !void {
+    const encoded = "eyJhbGciOiJub25lIn0.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.";
+    const ClaimSet = struct {
+        iss: []const u8,
+        exp: u64,
+        @"http://example.com/is_root": bool,
+    };
+    const claim_set = try decode(ClaimSet, allocator, encoded, null);
+    defer claim_set.deinit();
+}
 
-    const dec_jwt = try codec.decode(struct { test_field: i32 }, std.testing.allocator, enc_str);
-    defer dec_jwt.deinit();
+test "decode with alg=none" {
+    // Test example from https://datatracker.ietf.org/doc/html/rfc7519#section-6.1
+    const encoded = "eyJhbGciOiJub25lIn0.eyJpc3MiOiJqb2UiLA0KICJleHAiOjEzMDA4MTkzODAsDQogImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.";
 
-    try std.testing.expectEqual(5, dec_jwt.payload.test_field);
+    const ClaimSet = struct {
+        iss: []const u8,
+        exp: u64,
+        @"http://example.com/is_root": bool,
+    };
+    const expected = ClaimSet{
+        .iss = "joe",
+        .exp = 1300819380,
+        .@"http://example.com/is_root" = true,
+    };
+
+    const claim_set = try decode(ClaimSet, std.testing.allocator, encoded, null);
+    defer claim_set.deinit();
+
+    try std.testing.expectEqualDeep(expected, claim_set.value);
 }
