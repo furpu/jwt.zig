@@ -1,3 +1,5 @@
+//! Signing and verifying algorithms.
+
 const std = @import("std");
 
 const es = @import("algorithms/es.zig");

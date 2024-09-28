@@ -16,6 +16,23 @@ pub fn build(b: *std.Build) void {
     });
     jwt.addImport("cricket", cricket.module("cricket"));
 
+    // Docs
+    const docs = b.addObject(.{
+        .name = "docs",
+        .root_source_file = b.path("src/jwt.zig"),
+        .target = target,
+        .optimize = .Debug,
+    });
+
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+
+    const docs_step = b.step("docs", "Generate documentation");
+    docs_step.dependOn(&install_docs.step);
+
     // Examples
     const example_step = b.step("examples", "Build examples");
     const example_filenames = [_][]const u8{

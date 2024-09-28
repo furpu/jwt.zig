@@ -1,3 +1,5 @@
+//! JWT encoding and decoding.
+
 const std = @import("std");
 const base64 = std.base64;
 const json = std.json;
@@ -16,6 +18,9 @@ const Header = struct {
     cty: ?[]const u8 = null,
 };
 
+/// Encodes a claim set into a JWT string using the given signer to generate the signature.
+///
+/// If signer is `null`, this encodes a unsecure JWT (i.e. no signature).
 pub fn encode(allocator: Allocator, claim_set: anytype, signer: anytype) ![]const u8 {
     const SignerT = @TypeOf(signer);
 
@@ -64,6 +69,9 @@ pub fn encode(allocator: Allocator, claim_set: anytype, signer: anytype) ![]cons
     return try encoded_buffer.toOwnedSlice();
 }
 
+/// Decodes a JWT string and parse its claim set into a value of type `T`.
+///
+/// The given verifier is used to verify the JWT signature. If verifier is `null`, no signature verification is done.
 pub fn decode(comptime T: type, allocator: Allocator, encoded: []const u8, verifier: anytype) !json.Parsed(T) {
     var part_iter = std.mem.splitScalar(u8, encoded, '.');
     var parts_len: usize = 0;
